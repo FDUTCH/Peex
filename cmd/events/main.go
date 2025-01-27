@@ -108,7 +108,11 @@ func main() {
 		if !ok || imp.Tok != token.IMPORT {
 			continue
 		}
-		imports += "\n" + sourceContent[imp.Pos()-1:imp.End()-1]
+		importstr := sourceContent[imp.Pos()-1 : imp.End()-1]
+		if strings.Contains(importstr, "event") {
+			continue
+		}
+		imports += "\n" + importstr
 		break
 	}
 	imports = strings.TrimPrefix(imports, "\n")
@@ -149,7 +153,7 @@ func main() {
 
 		methodBody := fmt.Sprintf(methodBodyTemplate, eventName, interfaceName, name, eventArgs)
 		if eventName == "eventQuit" {
-			methodBody += "\n\ts.doQuit()" // to run the session specific logic when the player quits
+			methodBody += "\n\th.doQuit()" // to run the session specific logic when the player quits
 		}
 		handlers += "\n\n" + fmt.Sprintf(methodTemplate, funcDecl, methodBody)
 	}
@@ -165,7 +169,7 @@ func main() {
 		strings.TrimPrefix(interfaces, "\n\n"),
 		strings.TrimPrefix(handlers, "\n\n"),
 	)
-
+	filledTemplate = strings.ReplaceAll(strings.ReplaceAll(filledTemplate, "*Context", "*player.Context"), "*Player", "*player.Player")
 	err = os.WriteFile(*optOutFile, bytes.NewBufferString(filledTemplate).Bytes(), os.ModePerm)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error writing output file: %s\n", err.Error())
@@ -203,11 +207,11 @@ var allEvents = map[string]eventId{
 %s
 `
 
-const methodTemplate = `func (s *Session) %s {
+const methodTemplate = `func (h *Session) %s {
 	%s
 }`
 
-const methodBodyTemplate = `s.handleEvent(%s, func(h Handler) {
+const methodBodyTemplate = `h.handleEvent(%s, func(h Handler) {
 		h.(%s).%s(%s)
 	})`
 

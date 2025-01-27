@@ -3,7 +3,6 @@ package peex
 import (
 	"errors"
 	"fmt"
-	"github.com/df-mc/dragonfly/server"
 	"github.com/df-mc/dragonfly/server/player"
 	"github.com/google/uuid"
 	"reflect"
@@ -13,8 +12,6 @@ import (
 
 // Manager stores all current sessions. It also contains all the registered handlers and component types.
 type Manager struct {
-	logger server.Logger
-
 	sessions  map[uuid.UUID]*Session
 	sessionMu sync.RWMutex
 
@@ -34,7 +31,6 @@ type Manager struct {
 // a player Session in order to actually run.
 func New(cfg Config) *Manager {
 	m := &Manager{
-		logger:           cfg.Logger,
 		sessions:         map[uuid.UUID]*Session{},
 		handlerIdTable:   map[reflect.Type]handlerId{},
 		handlers:         map[handlerId]handlerInfo{},

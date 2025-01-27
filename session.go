@@ -226,8 +226,8 @@ func (s *Session) doQuit() {
 
 	for _, comp := range s.components {
 		_, err := s.removeComponent(s.m.getComponentId(comp), comp)
-		if err != nil && s.m.logger != nil {
-			s.m.logger.Errorf("%w", err)
+		if err != nil {
+			panic(err)
 		}
 	}
 

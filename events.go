@@ -3,16 +3,16 @@
 package peex
 
 import (
-	"net"
-	"time"
-
 	"github.com/df-mc/dragonfly/server/block/cube"
 	"github.com/df-mc/dragonfly/server/cmd"
-	"github.com/df-mc/dragonfly/server/event"
 	"github.com/df-mc/dragonfly/server/item"
+	"github.com/df-mc/dragonfly/server/player"
 	"github.com/df-mc/dragonfly/server/player/skin"
+	"github.com/df-mc/dragonfly/server/session"
 	"github.com/df-mc/dragonfly/server/world"
 	"github.com/go-gl/mathgl/mgl64"
+	"net"
+	"time"
 )
 
 type eventId uint
@@ -31,6 +31,7 @@ const (
 	eventDeath
 	eventRespawn
 	eventSkinChange
+	eventFireExtinguish
 	eventStartBreak
 	eventBlockBreak
 	eventBlockPlace
@@ -38,18 +39,21 @@ const (
 	eventItemUse
 	eventItemUseOnBlock
 	eventItemUseOnEntity
+	eventItemRelease
 	eventItemConsume
 	eventAttackEntity
 	eventExperienceGain
 	eventPunchAir
 	eventSignEdit
+	eventLecternPageTurn
 	eventItemDamage
 	eventItemPickup
+	eventHeldSlotChange
 	eventItemDrop
 	eventTransfer
 	eventCommandExecution
 	eventQuit
-	eventLecternPageTurn
+	eventDiagnostics
 )
 
 // getHandlerEvents returns which events a handler implements. Since it is impossible to distinguish actually imlemented
@@ -97,6 +101,9 @@ func getHandlerEvents(h Handler) map[eventId]struct{} {
 	if _, ok := h.(eventSkinChangeHandler); ok {
 		m[eventSkinChange] = struct{}{}
 	}
+	if _, ok := h.(eventFireExtinguishHandler); ok {
+		m[eventFireExtinguish] = struct{}{}
+	}
 	if _, ok := h.(eventStartBreakHandler); ok {
 		m[eventStartBreak] = struct{}{}
 	}
@@ -118,6 +125,9 @@ func getHandlerEvents(h Handler) map[eventId]struct{} {
 	if _, ok := h.(eventItemUseOnEntityHandler); ok {
 		m[eventItemUseOnEntity] = struct{}{}
 	}
+	if _, ok := h.(eventItemReleaseHandler); ok {
+		m[eventItemRelease] = struct{}{}
+	}
 	if _, ok := h.(eventItemConsumeHandler); ok {
 		m[eventItemConsume] = struct{}{}
 	}
@@ -133,11 +143,17 @@ func getHandlerEvents(h Handler) map[eventId]struct{} {
 	if _, ok := h.(eventSignEditHandler); ok {
 		m[eventSignEdit] = struct{}{}
 	}
+	if _, ok := h.(eventLecternPageTurnHandler); ok {
+		m[eventLecternPageTurn] = struct{}{}
+	}
 	if _, ok := h.(eventItemDamageHandler); ok {
 		m[eventItemDamage] = struct{}{}
 	}
 	if _, ok := h.(eventItemPickupHandler); ok {
 		m[eventItemPickup] = struct{}{}
+	}
+	if _, ok := h.(eventHeldSlotChangeHandler); ok {
+		m[eventHeldSlotChange] = struct{}{}
 	}
 	if _, ok := h.(eventItemDropHandler); ok {
 		m[eventItemDrop] = struct{}{}
@@ -151,8 +167,8 @@ func getHandlerEvents(h Handler) map[eventId]struct{} {
 	if _, ok := h.(eventQuitHandler); ok {
 		m[eventQuit] = struct{}{}
 	}
-	if _, ok := h.(eventLecternPageTurnHandler); ok {
-		m[eventLecternPageTurn] = struct{}{}
+	if _, ok := h.(eventDiagnosticsHandler); ok {
+		m[eventDiagnostics] = struct{}{}
 	}
 	return m
 }
@@ -171,6 +187,7 @@ var allEvents = map[string]eventId{
 	"eventDeath":            eventDeath,
 	"eventRespawn":          eventRespawn,
 	"eventSkinChange":       eventSkinChange,
+	"eventFireExtinguish":   eventFireExtinguish,
 	"eventStartBreak":       eventStartBreak,
 	"eventBlockBreak":       eventBlockBreak,
 	"eventBlockPlace":       eventBlockPlace,
@@ -178,337 +195,380 @@ var allEvents = map[string]eventId{
 	"eventItemUse":          eventItemUse,
 	"eventItemUseOnBlock":   eventItemUseOnBlock,
 	"eventItemUseOnEntity":  eventItemUseOnEntity,
+	"eventItemRelease":      eventItemRelease,
 	"eventItemConsume":      eventItemConsume,
 	"eventAttackEntity":     eventAttackEntity,
 	"eventExperienceGain":   eventExperienceGain,
 	"eventPunchAir":         eventPunchAir,
 	"eventSignEdit":         eventSignEdit,
+	"eventLecternPageTurn":  eventLecternPageTurn,
 	"eventItemDamage":       eventItemDamage,
 	"eventItemPickup":       eventItemPickup,
+	"eventHeldSlotChange":   eventHeldSlotChange,
 	"eventItemDrop":         eventItemDrop,
 	"eventTransfer":         eventTransfer,
 	"eventCommandExecution": eventCommandExecution,
 	"eventQuit":             eventQuit,
-	"eventLecternPageTurn":  eventLecternPageTurn,
+	"eventDiagnostics":      eventDiagnostics,
 }
 
 type eventMoveHandler interface {
-	HandleMove(ctx *event.Context, newPos mgl64.Vec3, newYaw, newPitch float64)
+	HandleMove(ctx *player.Context, newPos mgl64.Vec3, newRot cube.Rotation)
 }
 
 type eventJumpHandler interface {
-	HandleJump()
+	HandleJump(p *player.Player)
 }
 
 type eventTeleportHandler interface {
-	HandleTeleport(ctx *event.Context, pos mgl64.Vec3)
+	HandleTeleport(ctx *player.Context, pos mgl64.Vec3)
 }
 
 type eventChangeWorldHandler interface {
-	HandleChangeWorld(before, after *world.World)
+	HandleChangeWorld(p *player.Player, before, after *world.World)
 }
 
 type eventToggleSprintHandler interface {
-	HandleToggleSprint(ctx *event.Context, after bool)
+	HandleToggleSprint(ctx *player.Context, after bool)
 }
 
 type eventToggleSneakHandler interface {
-	HandleToggleSneak(ctx *event.Context, after bool)
+	HandleToggleSneak(ctx *player.Context, after bool)
 }
 
 type eventChatHandler interface {
-	HandleChat(ctx *event.Context, message *string)
+	HandleChat(ctx *player.Context, message *string)
 }
 
 type eventFoodLossHandler interface {
-	HandleFoodLoss(ctx *event.Context, from int, to *int)
+	HandleFoodLoss(ctx *player.Context, from int, to *int)
 }
 
 type eventHealHandler interface {
-	HandleHeal(ctx *event.Context, health *float64, src world.HealingSource)
+	HandleHeal(ctx *player.Context, health *float64, src world.HealingSource)
 }
 
 type eventHurtHandler interface {
-	HandleHurt(ctx *event.Context, damage *float64, attackImmunity *time.Duration, src world.DamageSource)
+	HandleHurt(ctx *player.Context, damage *float64, immune bool, attackImmunity *time.Duration, src world.DamageSource)
 }
 
 type eventDeathHandler interface {
-	HandleDeath(src world.DamageSource, keepInv *bool)
+	HandleDeath(p *player.Player, src world.DamageSource, keepInv *bool)
 }
 
 type eventRespawnHandler interface {
-	HandleRespawn(pos *mgl64.Vec3, w **world.World)
+	HandleRespawn(p *player.Player, pos *mgl64.Vec3, w **world.World)
 }
 
 type eventSkinChangeHandler interface {
-	HandleSkinChange(ctx *event.Context, skin *skin.Skin)
+	HandleSkinChange(ctx *player.Context, skin *skin.Skin)
+}
+
+type eventFireExtinguishHandler interface {
+	HandleFireExtinguish(ctx *player.Context, pos cube.Pos)
 }
 
 type eventStartBreakHandler interface {
-	HandleStartBreak(ctx *event.Context, pos cube.Pos)
+	HandleStartBreak(ctx *player.Context, pos cube.Pos)
 }
 
 type eventBlockBreakHandler interface {
-	HandleBlockBreak(ctx *event.Context, pos cube.Pos, drops *[]item.Stack, xp *int)
+	HandleBlockBreak(ctx *player.Context, pos cube.Pos, drops *[]item.Stack, xp *int)
 }
 
 type eventBlockPlaceHandler interface {
-	HandleBlockPlace(ctx *event.Context, pos cube.Pos, b world.Block)
+	HandleBlockPlace(ctx *player.Context, pos cube.Pos, b world.Block)
 }
 
 type eventBlockPickHandler interface {
-	HandleBlockPick(ctx *event.Context, pos cube.Pos, b world.Block)
+	HandleBlockPick(ctx *player.Context, pos cube.Pos, b world.Block)
 }
 
 type eventItemUseHandler interface {
-	HandleItemUse(ctx *event.Context)
+	HandleItemUse(ctx *player.Context)
 }
 
 type eventItemUseOnBlockHandler interface {
-	HandleItemUseOnBlock(ctx *event.Context, pos cube.Pos, face cube.Face, clickPos mgl64.Vec3)
+	HandleItemUseOnBlock(ctx *player.Context, pos cube.Pos, face cube.Face, clickPos mgl64.Vec3)
 }
 
 type eventItemUseOnEntityHandler interface {
-	HandleItemUseOnEntity(ctx *event.Context, e world.Entity)
+	HandleItemUseOnEntity(ctx *player.Context, e world.Entity)
+}
+
+type eventItemReleaseHandler interface {
+	HandleItemRelease(ctx *player.Context, item item.Stack, dur time.Duration)
 }
 
 type eventItemConsumeHandler interface {
-	HandleItemConsume(ctx *event.Context, item item.Stack)
+	HandleItemConsume(ctx *player.Context, item item.Stack)
 }
 
 type eventAttackEntityHandler interface {
-	HandleAttackEntity(ctx *event.Context, e world.Entity, force, height *float64, critical *bool)
+	HandleAttackEntity(ctx *player.Context, e world.Entity, force, height *float64, critical *bool)
 }
 
 type eventExperienceGainHandler interface {
-	HandleExperienceGain(ctx *event.Context, amount *int)
+	HandleExperienceGain(ctx *player.Context, amount *int)
 }
 
 type eventPunchAirHandler interface {
-	HandlePunchAir(ctx *event.Context)
+	HandlePunchAir(ctx *player.Context)
 }
 
 type eventSignEditHandler interface {
-	HandleSignEdit(ctx *event.Context, frontSide bool, oldText, newText string)
-}
-
-type eventItemDamageHandler interface {
-	HandleItemDamage(ctx *event.Context, i item.Stack, damage int)
-}
-
-type eventItemPickupHandler interface {
-	HandleItemPickup(ctx *event.Context, i *item.Stack)
-}
-
-type eventItemDropHandler interface {
-	HandleItemDrop(ctx *event.Context, e world.Entity)
-}
-
-type eventTransferHandler interface {
-	HandleTransfer(ctx *event.Context, addr *net.UDPAddr)
-}
-
-type eventCommandExecutionHandler interface {
-	HandleCommandExecution(ctx *event.Context, command cmd.Command, args []string)
-}
-
-type eventQuitHandler interface {
-	HandleQuit()
+	HandleSignEdit(ctx *player.Context, pos cube.Pos, frontSide bool, oldText, newText string)
 }
 
 type eventLecternPageTurnHandler interface {
-	HandleLecternPageTurn(ctx *event.Context, pos cube.Pos, oldPage int, newPage *int)
+	HandleLecternPageTurn(ctx *player.Context, pos cube.Pos, oldPage int, newPage *int)
 }
 
-func (s *Session) HandleMove(ctx *event.Context, newPos mgl64.Vec3, newYaw, newPitch float64) {
-	s.handleEvent(eventMove, func(h Handler) {
-		h.(eventMoveHandler).HandleMove(ctx, newPos, newYaw, newPitch)
+type eventItemDamageHandler interface {
+	HandleItemDamage(ctx *player.Context, i item.Stack, damage int)
+}
+
+type eventItemPickupHandler interface {
+	HandleItemPickup(ctx *player.Context, i *item.Stack)
+}
+
+type eventHeldSlotChangeHandler interface {
+	HandleHeldSlotChange(ctx *player.Context, from, to int)
+}
+
+type eventItemDropHandler interface {
+	HandleItemDrop(ctx *player.Context, s item.Stack)
+}
+
+type eventTransferHandler interface {
+	HandleTransfer(ctx *player.Context, addr *net.UDPAddr)
+}
+
+type eventCommandExecutionHandler interface {
+	HandleCommandExecution(ctx *player.Context, command cmd.Command, args []string)
+}
+
+type eventQuitHandler interface {
+	HandleQuit(p *player.Player)
+}
+
+type eventDiagnosticsHandler interface {
+	HandleDiagnostics(p *player.Player, d session.Diagnostics)
+}
+
+func (h *Session) HandleMove(ctx *player.Context, newPos mgl64.Vec3, newRot cube.Rotation) {
+	h.handleEvent(eventMove, func(h Handler) {
+		h.(eventMoveHandler).HandleMove(ctx, newPos, newRot)
 	})
 }
 
-func (s *Session) HandleJump() {
-	s.handleEvent(eventJump, func(h Handler) {
-		h.(eventJumpHandler).HandleJump()
+func (h *Session) HandleJump(p *player.Player) {
+	h.handleEvent(eventJump, func(h Handler) {
+		h.(eventJumpHandler).HandleJump(p)
 	})
 }
 
-func (s *Session) HandleTeleport(ctx *event.Context, pos mgl64.Vec3) {
-	s.handleEvent(eventTeleport, func(h Handler) {
+func (h *Session) HandleTeleport(ctx *player.Context, pos mgl64.Vec3) {
+	h.handleEvent(eventTeleport, func(h Handler) {
 		h.(eventTeleportHandler).HandleTeleport(ctx, pos)
 	})
 }
 
-func (s *Session) HandleChangeWorld(before, after *world.World) {
-	s.handleEvent(eventChangeWorld, func(h Handler) {
-		h.(eventChangeWorldHandler).HandleChangeWorld(before, after)
+func (h *Session) HandleChangeWorld(p *player.Player, before, after *world.World) {
+	h.handleEvent(eventChangeWorld, func(h Handler) {
+		h.(eventChangeWorldHandler).HandleChangeWorld(p, before, after)
 	})
 }
 
-func (s *Session) HandleToggleSprint(ctx *event.Context, after bool) {
-	s.handleEvent(eventToggleSprint, func(h Handler) {
+func (h *Session) HandleToggleSprint(ctx *player.Context, after bool) {
+	h.handleEvent(eventToggleSprint, func(h Handler) {
 		h.(eventToggleSprintHandler).HandleToggleSprint(ctx, after)
 	})
 }
 
-func (s *Session) HandleToggleSneak(ctx *event.Context, after bool) {
-	s.handleEvent(eventToggleSneak, func(h Handler) {
+func (h *Session) HandleToggleSneak(ctx *player.Context, after bool) {
+	h.handleEvent(eventToggleSneak, func(h Handler) {
 		h.(eventToggleSneakHandler).HandleToggleSneak(ctx, after)
 	})
 }
 
-func (s *Session) HandleChat(ctx *event.Context, message *string) {
-	s.handleEvent(eventChat, func(h Handler) {
+func (h *Session) HandleChat(ctx *player.Context, message *string) {
+	h.handleEvent(eventChat, func(h Handler) {
 		h.(eventChatHandler).HandleChat(ctx, message)
 	})
 }
 
-func (s *Session) HandleFoodLoss(ctx *event.Context, from int, to *int) {
-	s.handleEvent(eventFoodLoss, func(h Handler) {
+func (h *Session) HandleFoodLoss(ctx *player.Context, from int, to *int) {
+	h.handleEvent(eventFoodLoss, func(h Handler) {
 		h.(eventFoodLossHandler).HandleFoodLoss(ctx, from, to)
 	})
 }
 
-func (s *Session) HandleHeal(ctx *event.Context, health *float64, src world.HealingSource) {
-	s.handleEvent(eventHeal, func(h Handler) {
+func (h *Session) HandleHeal(ctx *player.Context, health *float64, src world.HealingSource) {
+	h.handleEvent(eventHeal, func(h Handler) {
 		h.(eventHealHandler).HandleHeal(ctx, health, src)
 	})
 }
 
-func (s *Session) HandleHurt(ctx *event.Context, damage *float64, attackImmunity *time.Duration, src world.DamageSource) {
-	s.handleEvent(eventHurt, func(h Handler) {
-		h.(eventHurtHandler).HandleHurt(ctx, damage, attackImmunity, src)
+func (h *Session) HandleHurt(ctx *player.Context, damage *float64, immune bool, attackImmunity *time.Duration, src world.DamageSource) {
+	h.handleEvent(eventHurt, func(h Handler) {
+		h.(eventHurtHandler).HandleHurt(ctx, damage, immune, attackImmunity, src)
 	})
 }
 
-func (s *Session) HandleDeath(src world.DamageSource, keepInv *bool) {
-	s.handleEvent(eventDeath, func(h Handler) {
-		h.(eventDeathHandler).HandleDeath(src, keepInv)
+func (h *Session) HandleDeath(p *player.Player, src world.DamageSource, keepInv *bool) {
+	h.handleEvent(eventDeath, func(h Handler) {
+		h.(eventDeathHandler).HandleDeath(p, src, keepInv)
 	})
 }
 
-func (s *Session) HandleRespawn(pos *mgl64.Vec3, w **world.World) {
-	s.handleEvent(eventRespawn, func(h Handler) {
-		h.(eventRespawnHandler).HandleRespawn(pos, w)
+func (h *Session) HandleRespawn(p *player.Player, pos *mgl64.Vec3, w **world.World) {
+	h.handleEvent(eventRespawn, func(h Handler) {
+		h.(eventRespawnHandler).HandleRespawn(p, pos, w)
 	})
 }
 
-func (s *Session) HandleSkinChange(ctx *event.Context, skin *skin.Skin) {
-	s.handleEvent(eventSkinChange, func(h Handler) {
+func (h *Session) HandleSkinChange(ctx *player.Context, skin *skin.Skin) {
+	h.handleEvent(eventSkinChange, func(h Handler) {
 		h.(eventSkinChangeHandler).HandleSkinChange(ctx, skin)
 	})
 }
 
-func (s *Session) HandleStartBreak(ctx *event.Context, pos cube.Pos) {
-	s.handleEvent(eventStartBreak, func(h Handler) {
+func (h *Session) HandleFireExtinguish(ctx *player.Context, pos cube.Pos) {
+	h.handleEvent(eventFireExtinguish, func(h Handler) {
+		h.(eventFireExtinguishHandler).HandleFireExtinguish(ctx, pos)
+	})
+}
+
+func (h *Session) HandleStartBreak(ctx *player.Context, pos cube.Pos) {
+	h.handleEvent(eventStartBreak, func(h Handler) {
 		h.(eventStartBreakHandler).HandleStartBreak(ctx, pos)
 	})
 }
 
-func (s *Session) HandleBlockBreak(ctx *event.Context, pos cube.Pos, drops *[]item.Stack, xp *int) {
-	s.handleEvent(eventBlockBreak, func(h Handler) {
+func (h *Session) HandleBlockBreak(ctx *player.Context, pos cube.Pos, drops *[]item.Stack, xp *int) {
+	h.handleEvent(eventBlockBreak, func(h Handler) {
 		h.(eventBlockBreakHandler).HandleBlockBreak(ctx, pos, drops, xp)
 	})
 }
 
-func (s *Session) HandleBlockPlace(ctx *event.Context, pos cube.Pos, b world.Block) {
-	s.handleEvent(eventBlockPlace, func(h Handler) {
+func (h *Session) HandleBlockPlace(ctx *player.Context, pos cube.Pos, b world.Block) {
+	h.handleEvent(eventBlockPlace, func(h Handler) {
 		h.(eventBlockPlaceHandler).HandleBlockPlace(ctx, pos, b)
 	})
 }
 
-func (s *Session) HandleBlockPick(ctx *event.Context, pos cube.Pos, b world.Block) {
-	s.handleEvent(eventBlockPick, func(h Handler) {
+func (h *Session) HandleBlockPick(ctx *player.Context, pos cube.Pos, b world.Block) {
+	h.handleEvent(eventBlockPick, func(h Handler) {
 		h.(eventBlockPickHandler).HandleBlockPick(ctx, pos, b)
 	})
 }
 
-func (s *Session) HandleItemUse(ctx *event.Context) {
-	s.handleEvent(eventItemUse, func(h Handler) {
+func (h *Session) HandleItemUse(ctx *player.Context) {
+	h.handleEvent(eventItemUse, func(h Handler) {
 		h.(eventItemUseHandler).HandleItemUse(ctx)
 	})
 }
 
-func (s *Session) HandleItemUseOnBlock(ctx *event.Context, pos cube.Pos, face cube.Face, clickPos mgl64.Vec3) {
-	s.handleEvent(eventItemUseOnBlock, func(h Handler) {
+func (h *Session) HandleItemUseOnBlock(ctx *player.Context, pos cube.Pos, face cube.Face, clickPos mgl64.Vec3) {
+	h.handleEvent(eventItemUseOnBlock, func(h Handler) {
 		h.(eventItemUseOnBlockHandler).HandleItemUseOnBlock(ctx, pos, face, clickPos)
 	})
 }
 
-func (s *Session) HandleItemUseOnEntity(ctx *event.Context, e world.Entity) {
-	s.handleEvent(eventItemUseOnEntity, func(h Handler) {
+func (h *Session) HandleItemUseOnEntity(ctx *player.Context, e world.Entity) {
+	h.handleEvent(eventItemUseOnEntity, func(h Handler) {
 		h.(eventItemUseOnEntityHandler).HandleItemUseOnEntity(ctx, e)
 	})
 }
 
-func (s *Session) HandleItemConsume(ctx *event.Context, item item.Stack) {
-	s.handleEvent(eventItemConsume, func(h Handler) {
+func (h *Session) HandleItemRelease(ctx *player.Context, item item.Stack, dur time.Duration) {
+	h.handleEvent(eventItemRelease, func(h Handler) {
+		h.(eventItemReleaseHandler).HandleItemRelease(ctx, item, dur)
+	})
+}
+
+func (h *Session) HandleItemConsume(ctx *player.Context, item item.Stack) {
+	h.handleEvent(eventItemConsume, func(h Handler) {
 		h.(eventItemConsumeHandler).HandleItemConsume(ctx, item)
 	})
 }
 
-func (s *Session) HandleAttackEntity(ctx *event.Context, e world.Entity, force, height *float64, critical *bool) {
-	s.handleEvent(eventAttackEntity, func(h Handler) {
+func (h *Session) HandleAttackEntity(ctx *player.Context, e world.Entity, force, height *float64, critical *bool) {
+	h.handleEvent(eventAttackEntity, func(h Handler) {
 		h.(eventAttackEntityHandler).HandleAttackEntity(ctx, e, force, height, critical)
 	})
 }
 
-func (s *Session) HandleExperienceGain(ctx *event.Context, amount *int) {
-	s.handleEvent(eventExperienceGain, func(h Handler) {
+func (h *Session) HandleExperienceGain(ctx *player.Context, amount *int) {
+	h.handleEvent(eventExperienceGain, func(h Handler) {
 		h.(eventExperienceGainHandler).HandleExperienceGain(ctx, amount)
 	})
 }
 
-func (s *Session) HandlePunchAir(ctx *event.Context) {
-	s.handleEvent(eventPunchAir, func(h Handler) {
+func (h *Session) HandlePunchAir(ctx *player.Context) {
+	h.handleEvent(eventPunchAir, func(h Handler) {
 		h.(eventPunchAirHandler).HandlePunchAir(ctx)
 	})
 }
 
-func (s *Session) HandleSignEdit(ctx *event.Context, frontSide bool, oldText, newText string) {
-	s.handleEvent(eventSignEdit, func(h Handler) {
-		h.(eventSignEditHandler).HandleSignEdit(ctx, frontSide, oldText, newText)
+func (h *Session) HandleSignEdit(ctx *player.Context, pos cube.Pos, frontSide bool, oldText, newText string) {
+	h.handleEvent(eventSignEdit, func(h Handler) {
+		h.(eventSignEditHandler).HandleSignEdit(ctx, pos, frontSide, oldText, newText)
 	})
 }
 
-func (s *Session) HandleItemDamage(ctx *event.Context, i item.Stack, damage int) {
-	s.handleEvent(eventItemDamage, func(h Handler) {
+func (h *Session) HandleLecternPageTurn(ctx *player.Context, pos cube.Pos, oldPage int, newPage *int) {
+	h.handleEvent(eventLecternPageTurn, func(h Handler) {
+		h.(eventLecternPageTurnHandler).HandleLecternPageTurn(ctx, pos, oldPage, newPage)
+	})
+}
+
+func (h *Session) HandleItemDamage(ctx *player.Context, i item.Stack, damage int) {
+	h.handleEvent(eventItemDamage, func(h Handler) {
 		h.(eventItemDamageHandler).HandleItemDamage(ctx, i, damage)
 	})
 }
 
-func (s *Session) HandleItemPickup(ctx *event.Context, i *item.Stack) {
-	s.handleEvent(eventItemPickup, func(h Handler) {
+func (h *Session) HandleItemPickup(ctx *player.Context, i *item.Stack) {
+	h.handleEvent(eventItemPickup, func(h Handler) {
 		h.(eventItemPickupHandler).HandleItemPickup(ctx, i)
 	})
 }
 
-func (s *Session) HandleItemDrop(ctx *event.Context, e world.Entity) {
-	s.handleEvent(eventItemDrop, func(h Handler) {
-		h.(eventItemDropHandler).HandleItemDrop(ctx, e)
+func (h *Session) HandleHeldSlotChange(ctx *player.Context, from, to int) {
+	h.handleEvent(eventHeldSlotChange, func(h Handler) {
+		h.(eventHeldSlotChangeHandler).HandleHeldSlotChange(ctx, from, to)
 	})
 }
 
-func (s *Session) HandleTransfer(ctx *event.Context, addr *net.UDPAddr) {
-	s.handleEvent(eventTransfer, func(h Handler) {
+func (h *Session) HandleItemDrop(ctx *player.Context, s item.Stack) {
+	h.handleEvent(eventItemDrop, func(h Handler) {
+		h.(eventItemDropHandler).HandleItemDrop(ctx, s)
+	})
+}
+
+func (h *Session) HandleTransfer(ctx *player.Context, addr *net.UDPAddr) {
+	h.handleEvent(eventTransfer, func(h Handler) {
 		h.(eventTransferHandler).HandleTransfer(ctx, addr)
 	})
 }
 
-func (s *Session) HandleCommandExecution(ctx *event.Context, command cmd.Command, args []string) {
-	s.handleEvent(eventCommandExecution, func(h Handler) {
+func (h *Session) HandleCommandExecution(ctx *player.Context, command cmd.Command, args []string) {
+	h.handleEvent(eventCommandExecution, func(h Handler) {
 		h.(eventCommandExecutionHandler).HandleCommandExecution(ctx, command, args)
 	})
 }
 
-func (s *Session) HandleQuit() {
-	s.handleEvent(eventQuit, func(h Handler) {
-		h.(eventQuitHandler).HandleQuit()
+func (h *Session) HandleQuit(p *player.Player) {
+	h.handleEvent(eventQuit, func(h Handler) {
+		h.(eventQuitHandler).HandleQuit(p)
 	})
-	s.doQuit()
+	h.doQuit()
 }
 
-func (s *Session) HandleLecternPageTurn(ctx *event.Context, pos cube.Pos, oldPage int, newPage *int) {
-	s.handleEvent(eventLecternPageTurn, func(h Handler) {
-		h.(eventLecternPageTurnHandler).HandleLecternPageTurn(ctx, pos, oldPage, newPage)
+func (h *Session) HandleDiagnostics(p *player.Player, d session.Diagnostics) {
+	h.handleEvent(eventDiagnostics, func(h Handler) {
+		h.(eventDiagnosticsHandler).HandleDiagnostics(p, d)
 	})
 }
